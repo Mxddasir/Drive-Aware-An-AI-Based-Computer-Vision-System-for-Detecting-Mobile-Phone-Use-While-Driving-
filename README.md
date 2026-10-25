@@ -1,171 +1,155 @@
-# Drive Aware
+# DriveAware
 
-**AI-powered computer vision system for detecting active mobile phone use while driving.**
+**Detects drivers using a handheld phone from in-car camera images, video and live webcam.**
 
-Drive Aware fuses YOLO object detection with MediaPipe BlazePose body landmark estimation to identify phone use in images, video, and live webcam streams. Rather than flagging every phone that appears in frame, it requires contextual evidence — hands raised to the face, phone held in hand — to confirm active use, dramatically reducing false positives.
+DriveAware combines a fine-tuned **YOLOv11** phone detector with **MediaPipe** body-pose estimation. Instead of flagging every phone that appears in the frame, it only gets suspicious when the driver's posture says it should, and it explains every decision in plain English.
+
+Built as my BSc Computer Science dissertation at Brunel University of London (graded A, presented at the Brunel Software Innovation showcase).
+
+![DriveAware detecting phone use, with the step-by-step explanation](docs/demo_detection.png)
 
 ---
 
-## How It Works
+## Results
 
-Detection runs as a two-stage pipeline:
+| Metric | Score |
+|---|---|
+| Accuracy | 95.8% |
+| Precision | 100% (no false alarms on the test set) |
+| Recall | 89.0% (89 of 100 phone users caught) |
+| F1 | 94.2% |
+| Speed | 6.1 FPS on a laptop CPU |
 
-1. **YOLO at high confidence (0.75)** — if a phone is found with high certainty, it is accepted immediately.
-2. **If no high-confidence detection**, MediaPipe BlazePose estimates body landmarks. If a hand is within a normalised distance threshold of the face, the pose is flagged as *suspicious*.
-3. **YOLO at low confidence (0.25)** — run only on suspicious poses. A phone found here, combined with the suspicious pose, is accepted.
-4. Any detection can be further filtered by requiring the phone bounding box to be near a hand landmark (`require_hand_proximity` option).
+Measured on **259 held-out test images** (100 with phone use) using YOLOv11 with the default thresholds. YOLOv8 and YOLOv5 were trained on the same data for comparison, and you can re-run all three in the **Evaluation** tab.
 
+> **Honest caveat:** the test images come from the same dataset as the training images, with similar cameras, angles and lighting. These numbers are a starting point, not proof that it works in any car. Testing on real in-car footage is the next step (see [What's next](#whats-next)).
+
+---
+
+## How it works
+
+```mermaid
+flowchart LR
+    A[Camera frame] --> B["1. YOLOv11 phone detector<br/>(75% threshold)"]
+    B -- confident --> Y([Phone use])
+    B -- not sure --> C["2. MediaPipe pose<br/>Is a hand near the face?"]
+    C -- no --> N([No phone use])
+    C -- yes --> D["3. YOLOv11 again<br/>(25% threshold)"]
+    D -- found --> Y
+    D -- not found --> N
 ```
-Input frame
-    │
-    ▼
-YOLO (high conf 0.75) ──── found ──────────────────────► Accept
-    │ not found
-    ▼
-MediaPipe BlazePose
-    │
-    ├── hands NOT near face ──────────────────────────► Reject
-    │
-    └── hands near face (suspicious)
-            │
-            ▼
-        YOLO (low conf 0.25) ── found ───────────────► Accept
-                               not found ────────────► Reject
-```
+
+1. **Detect.** The fine-tuned YOLOv11 model looks for a phone. If it's at least 75% confident, that's enough.
+2. **Check posture.** If it isn't sure, MediaPipe estimates the driver's pose and measures how close the nearest hand is to the face.
+3. **Look again.** Only when a hand is up by the face does YOLO re-check at a lower 25% threshold, catching phones that are partly hidden by the hand.
+
+An optional filter also requires the detected phone to be in the driver's hand.
+
+Every image result in the app comes with a **"How it decided"** panel that walks through these three steps with the actual confidences and distances.
 
 ---
 
 ## Features
 
-| Mode | Description |
+| Mode | What it does |
 |---|---|
-| **Image Analysis** | Upload images or choose from sample library with search and pagination |
-| **Video Analysis** | Upload a video or choose a sample clip; frame-by-frame analysis with progress bar |
-| **Live Webcam** | Real-time detection stream; sustained phone use triggers a visual alert |
-| **Evaluation** | Run the full pipeline against a labelled test set; compare YOLO v11, v8, and v5 side by side with accuracy, precision, recall, F1, confusion matrix, and per-stage timing |
+| **How it works** | Overview of the pipeline and the evaluation results |
+| **Image Analysis** | Upload a photo, take one with your camera, or pick from 259 labelled samples. Each result shows the verdict and the reasoning behind it |
+| **Video Analysis** | Frame-by-frame analysis of a clip, with a drive report: safety score, incident timeline and PDF export |
+| **Live Webcam** | Real-time detection with an audio alert for sustained phone use |
+| **Evaluation** | Runs the full pipeline on the labelled test set and compares YOLOv11, v8 and v5: accuracy, precision, recall, F1, confusion matrix and per-stage timing |
 
-All modes generate a **Drive Report** — a safety score, incident timeline, and key insights, with optional PDF export.
-
----
-
-## Project Structure
-
-```
-drive-aware/
-├── streamlit_fusion_app.py      # Main web application (all UI and pipeline orchestration)
-│
-├── models/
-│   ├── phone_detector.py        # PhoneDetector — wraps YOLO (Ultralytics)
-│   └── pose_estimator.py        # PoseEstimator — wraps MediaPipe BlazePose
-│
-├── logic/
-│   ├── decision_engine.py       # DecisionEngine — two-stage confidence rule
-│   └── proximity_analyzer.py    # ProximityAnalyzer — hand-face and hand-phone distances
-│
-├── processors/
-│   ├── image_processor.py       # Single-image pipeline
-│   └── video_processor.py       # Video/webcam pipeline
-│
-├── utils/
-│   ├── visualization.py         # Pose skeleton and status overlay drawing
-│   └── constants.py             # MediaPipe landmark indices and pose connections
-│
-├── config/
-│   └── settings.py              # DetectionConfig dataclass with defaults
-│
-├── weights/
-│   ├── best.pt                  # YOLO v11 weights (primary)
-│   ├── weightsv8/best.pt        # YOLO v8 weights
-│   └── weightsv5/best.pt        # YOLO v5 weights
-│
-├── pose_landmarker_full.task    # MediaPipe BlazePose model
-├── Testing images/              # Labelled test set (image + .txt label file pairs)
-├── Testing videos/              # Sample video clips
-└── requirements.txt
-```
+<p>
+  <img src="docs/how_it_works_tab.png" width="49%" alt="How it works tab"/>
+  <img src="docs/no_phone_result.png" width="49%" alt="Result with no phone use"/>
+</p>
 
 ---
 
-## Installation
+## Run it locally
 
-**Requirements:** Python 3.10+, a webcam (for live mode)
+Requires Python 3.10+ (and a webcam for live mode).
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/mxddasir/drive-aware.git
-cd drive-aware
-
-# 2. Install dependencies
+git clone https://github.com/Mxddasir/DriveAware---Yolov11-with-Mediapipe-poseEstimation.git
+cd DriveAware---Yolov11-with-Mediapipe-poseEstimation
 pip install -r requirements.txt
-```
-
-**Model files** — two files are required that are not included in the repository due to size:
-
-| File | Location | Source |
-|---|---|---|
-| YOLO v11 weights | `weights/best.pt` | Trained model (contact repo owner) |
-| MediaPipe pose model | `pose_landmarker_full.task` | [MediaPipe Solutions](https://developers.google.com/mediapipe/solutions/vision/pose_landmarker) — download `pose_landmarker_full.task` |
-
-Optional YOLO v8/v5 weights go in `weights/weightsv8/best.pt` and `weights/weightsv5/best.pt` respectively (only needed for the Evaluation comparison tab).
-
----
-
-## Running the App
-
-```bash
 streamlit run streamlit_fusion_app.py
 ```
 
-Then open [http://localhost:8501](http://localhost:8501) in your browser.
+Then open http://localhost:8501.
+
+All model files are included in the repo:
+
+| File | What it is |
+|---|---|
+| `weights/best.pt` | Fine-tuned YOLOv11 phone detector (used by default) |
+| `weights/weightsv8/best.pt` | YOLOv8, trained on the same data (Evaluation tab) |
+| `weights/weightsv5/best.pt` | YOLOv5, trained on the same data (Evaluation tab) |
+| `pose_landmarker_full.task` | MediaPipe BlazePose model |
 
 ---
 
-## Configuration Parameters
+## Training data
 
-These are adjustable from the sidebar in the web app:
+- **Source:** in-car images from the State Farm Distracted Driver Detection dataset (Kaggle).
+- **Labelling:** I hand-annotated 2,058 images: 1,799 for training and 259 for testing.
+- **Training:** YOLOv11 fine-tuned in Google Colab with transfer learning from COCO-pretrained weights. YOLOv8 and YOLOv5 trained on the same split for a fair comparison.
+- **Test labels:** an image with a matching `.txt` label file in `Testing images/` is expected to show phone use; one without is expected to show none.
 
-| Parameter | Default | Description |
+---
+
+## Project structure
+
+```
+├── streamlit_fusion_app.py      # Web app: UI, pipeline orchestration, reports, evaluation
+├── models/
+│   ├── phone_detector.py        # YOLO wrapper
+│   └── pose_estimator.py        # MediaPipe BlazePose wrapper
+├── logic/
+│   ├── decision_engine.py       # The two-stage decision rule
+│   └── proximity_analyzer.py    # Hand-to-face and phone-to-hand distances
+├── processors/                  # Stand-alone image and video pipelines
+├── utils/
+│   ├── visualization.py         # Verdict banner, debug overlay, pose skeleton
+│   └── constants.py             # MediaPipe landmark indices
+├── config/settings.py           # Default thresholds
+├── weights/                     # YOLOv11, v8 and v5 weights
+├── Testing images/              # 259 labelled test images
+└── Testing videos/              # Sample clips
+```
+
+---
+
+## Settings
+
+All thresholds live in the sidebar under **Detection thresholds**. The defaults are the configuration used in the evaluation.
+
+| Setting | Default | Meaning |
 |---|---|---|
-| `conf_high` | `0.75` | Minimum YOLO confidence to immediately accept a phone detection |
-| `conf_low` | `0.25` | Fallback confidence used only when the pose is suspicious |
-| `hand_face_thresh` | `0.18` | Normalised distance threshold for hand-to-face proximity |
-| `hand_phone_thresh` | `0.12` | Normalised distance threshold for phone-to-hand proximity |
-| `require_hand_proximity` | `False` | Reject detections where the phone is not near a hand |
-| `draw_pose` | `False` | Overlay the BlazePose skeleton on output frames |
+| Phone confidence (normal) | 0.75 | YOLO confidence needed to flag a phone straight away |
+| Phone confidence (when pose is suspicious) | 0.25 | Lower threshold used only for the second look |
+| Hand-to-face distance | 0.18 | How close a hand must be to the face to count as suspicious |
+| Phone-to-hand distance | 0.12 | How close a phone must be to a hand (only with the hand filter on) |
+| Only count phones held in the hand | Off | Ignore phones that aren't near the driver's hand |
+
+Distances are a fraction of the image size. Turn on **Show technical overlay** to see the raw confidences and distances on each frame.
 
 ---
 
-## Evaluation
+## What's next
 
-The Evaluation tab runs the full pipeline against the `Testing images/` folder. Ground truth is determined by the presence of a `.txt` label file with the same name as the image — images with a label file are expected to show Phone Use; those without are expected to show No Phone Use.
-
-Results include:
-
-- **Summary** — accuracy, precision, recall, F1, TP/TN/FP/FN, and average inference time per model
-- **Stage Timing** — average milliseconds for each pipeline stage (YOLO high-conf, MediaPipe, proximity, YOLO low-conf, decision)
-- **Per-image Results** — searchable and paginated table comparing all models on every image
-- **Errors** — incorrect predictions with expandable image previews, paginated per model
-
-Metrics are computed as:
-
-```
-Accuracy  = (TP + TN) / (TP + TN + FP + FN)
-Precision = TP / (TP + FP)
-Recall    = TP / (TP + FN)
-F1        = 2 × (Precision × Recall) / (Precision + Recall)
-```
+- **Test on real in-car footage** from a different camera, car and lighting, including at night. This was the main feedback at the showcase.
+- **Run on in-car hardware** such as a Raspberry Pi or Jetson, and measure real-world latency.
+- **Speed it up.** 6.1 FPS on CPU is fine for a demo but not for a moving car. GPU inference or a smaller model export (ONNX / TensorRT) would help.
+- **Broaden the data** with more drivers, phones and seating positions.
 
 ---
 
-## Dependencies
+## Dissertation version
 
-```
-streamlit
-ultralytics
-opencv-python-headless==4.10.0.84
-torch
-mediapipe>=0.10.0
-reportlab          # optional — enables PDF report export
-```
+The exact code that was submitted and evaluated is tagged [`v1.0-dissertation`](../../tree/v1.0-dissertation). Later changes improve the interface and documentation only. The detection logic and default thresholds are unchanged, so the results above still apply.
 
+---
 
+**Muddasir Khan** · [LinkedIn](https://www.linkedin.com/in/muddasir-khan-/) · [GitHub](https://github.com/Mxddasir)
