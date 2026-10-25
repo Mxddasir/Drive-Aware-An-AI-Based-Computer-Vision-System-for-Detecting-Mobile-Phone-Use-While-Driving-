@@ -62,3 +62,29 @@ class Visualizer:
         cv2.putText(img_bgr, txt2, (15, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 2)
 
         return img_bgr
+
+    @staticmethod
+    def annotate_verdict(img_bgr: np.ndarray, active: bool) -> np.ndarray:
+        # draws a clean red/green banner with just the final verdict
+        # (annotate_status above keeps the full technical overlay for debugging)
+
+        h, w = img_bgr.shape[:2]
+        scale = max(0.6, w / 900)
+        bar_h = int(52 * scale)
+
+        label = "PHONE USE DETECTED" if active else "NO PHONE USE"
+        colour = (48, 48, 214) if active else (80, 160, 46)  # BGR: red / green
+
+        overlay = img_bgr.copy()
+        cv2.rectangle(overlay, (0, 0), (w, bar_h), colour, -1)
+        img_bgr = cv2.addWeighted(overlay, 0.88, img_bgr, 0.12, 0)
+
+        font = cv2.FONT_HERSHEY_DUPLEX
+        size = 0.95 * scale
+        thick = max(1, int(round(2 * scale)))
+        (tw, th), _ = cv2.getTextSize(label, font, size, thick)
+        x = int(16 * scale)
+        y = (bar_h + th) // 2
+        cv2.putText(img_bgr, label, (x, y), font, size, (255, 255, 255), thick, cv2.LINE_AA)
+
+        return img_bgr
