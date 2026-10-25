@@ -135,12 +135,14 @@ def _process_single_image_bgr(
     hand_phone_thresh: float,
     require_hand_proximity: bool,
     draw_pose: bool,
+    show_debug: bool = False,
+    return_trace: bool = False,
 ):
     H, W = frame_bgr.shape[:2]
 
     # first pass: YOLO at high confidence
     _t = time.time()
-    det_high, boxes_high, _ = phone_model.detect(frame_bgr, conf_high)
+    det_high, boxes_high, confs_high = phone_model.detect(frame_bgr, conf_high)
     yolo_high_ms = (time.time() - _t) * 1000
     found_high = boxes_high.shape[0] > 0
 
@@ -160,6 +162,8 @@ def _process_single_image_bgr(
     pose_ran = False
     proximity_ms = 0.0
     yolo_low_ms = 0.0
+    confs_low = np.empty((0,), dtype=np.float32)
+    low_pass_ran = False
 
     if need_pose:
         # run MediaPipe BlazePose to get body landmarks
@@ -194,8 +198,9 @@ def _process_single_image_bgr(
         # YOLO missed at high conf — try again at low conf only if pose looks suspicious
         if suspicious:
             _t = time.time()
-            det_low, boxes_low, _ = phone_model.detect(frame_bgr, conf_low)
+            det_low, boxes_low, confs_low = phone_model.detect(frame_bgr, conf_low)
             yolo_low_ms = (time.time() - _t) * 1000
+            low_pass_ran = True
             found_low = boxes_low.shape[0] > 0
             det_to_plot = det_low
             used_conf = conf_low
@@ -226,15 +231,18 @@ def _process_single_image_bgr(
     if draw_pose and pose_result is not None:
         annotated = Visualizer.draw_pose_landmarks(annotated, pose_result, draw_connections=True)
 
-    annotated = Visualizer.annotate_status(
-        annotated,
-        active=active,
-        suspicious=suspicious,
-        used_conf=used_conf,
-        reason=reason,
-        face_dist=face_d,
-        hand_dist=hand_d,
-    )
+    if show_debug:
+        annotated = Visualizer.annotate_status(
+            annotated,
+            active=active,
+            suspicious=suspicious,
+            used_conf=used_conf,
+            reason=reason,
+            face_dist=face_d,
+            hand_dist=hand_d,
+        )
+    else:
+        annotated = Visualizer.annotate_verdict(annotated, active=active)
 
     timing = {
         "yolo_high_ms": yolo_high_ms,
@@ -246,7 +254,195 @@ def _process_single_image_bgr(
         "total_ms": yolo_high_ms + pose_ms + proximity_ms + yolo_low_ms + decision_ms,
     }
 
+    if return_trace:
+        # everything needed to explain the decision step by step in the UI
+        trace = {
+            "active": active,
+            "reason": reason,
+            "conf_high": conf_high,
+            "conf_low": conf_low,
+            "found_high": found_high,
+            "best_conf_high": float(confs_high.max()) if len(confs_high) else None,
+            "pose_ran": pose_ran,
+            "person_found": bool(pose_result is not None and pose_result.pose_landmarks),
+            "suspicious": suspicious,
+            "face_d": face_d,
+            "hand_face_thresh": hand_face_thresh,
+            "low_pass_ran": low_pass_ran,
+            "found_low": found_low,
+            "best_conf_low": float(confs_low.max()) if len(confs_low) else None,
+            "require_hand_proximity": require_hand_proximity,
+            "hand_ok": hand_ok,
+            "hand_d": hand_d,
+            "hand_phone_thresh": hand_phone_thresh,
+            "total_ms": timing["total_ms"],
+        }
+        return annotated, active, timing, trace
+
     return annotated, active, timing
+
+
+def _render_decision_explanation(trace: dict):
+    # shows, in plain English, how the two-stage pipeline reached its verdict
+
+    if trace["active"]:
+        st.markdown(
+            "<div class='da-verdict da-verdict-on'>Phone use detected</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            "<div class='da-verdict da-verdict-off'>No phone use</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("##### How it decided")
+
+    # step 1: YOLO at the normal threshold
+    hi = int(round(trace["conf_high"] * 100))
+    if trace["found_high"]:
+        step1 = (
+            f"Found a phone at **{trace['best_conf_high'] * 100:.0f}%** confidence. "
+            f"That clears the {hi}% threshold, so this alone is enough."
+        )
+    else:
+        step1 = (
+            f"No phone at {hi}% confidence or higher. "
+            "Before giving up, it checks the driver's body language."
+        )
+    st.markdown(f"**1 · Phone detector (YOLOv11)**  \n{step1}")
+
+    # step 2: MediaPipe pose check
+    lim = trace["hand_face_thresh"]
+    if trace["found_high"]:
+        step2 = "Not needed. The detector was already confident."
+    elif not trace["person_found"]:
+        step2 = "No driver pose found in the frame, so there's nothing suspicious to follow up."
+    elif trace["suspicious"]:
+        step2 = (
+            f"A hand is close to the face (distance **{trace['face_d']:.2f}**, limit {lim:.2f}). "
+            "That's what phone use usually looks like, so it takes a second look."
+        )
+    else:
+        step2 = (
+            f"The nearest hand is **{trace['face_d']:.2f}** from the face (limit {lim:.2f}). "
+            "Nothing suspicious, so no second look."
+        )
+    st.markdown(f"**2 · Body-pose check (MediaPipe)**  \n{step2}")
+
+    # step 3: YOLO again at the lower threshold
+    lo = int(round(trace["conf_low"] * 100))
+    if not trace["low_pass_ran"]:
+        step3 = "Not needed."
+    elif trace["found_low"]:
+        step3 = f"Found a phone at **{trace['best_conf_low'] * 100:.0f}%** confidence (threshold {lo}%)."
+    else:
+        step3 = f"Still no phone at {lo}% confidence or higher."
+    st.markdown(f"**3 · Second look at a lower threshold**  \n{step3}")
+
+    # optional step 4: hand-proximity filter
+    if trace["require_hand_proximity"] and (trace["found_high"] or trace["found_low"]):
+        if "filtered" in trace["reason"]:
+            step4 = "The phone isn't close enough to the driver's hand, so it's ignored."
+        elif trace["hand_ok"]:
+            step4 = (
+                f"The phone is in the driver's hand (distance **{trace['hand_d']:.2f}**, "
+                f"limit {trace['hand_phone_thresh']:.2f})."
+            )
+        else:
+            step4 = "The hand check was passed because the pose already looked suspicious."
+        st.markdown(f"**4 · Is the phone in the driver's hand?**  \n{step4}")
+
+    st.caption(
+        f"Distances are a fraction of the image size. Processed in {trace['total_ms']:.0f} ms."
+    )
+
+
+def _show_image_result(frame_bgr: np.ndarray, title: str, **pipeline_kwargs):
+    # runs the pipeline on one image and shows the result next to its explanation
+    annotated_bgr, _, _, trace = _process_single_image_bgr(
+        frame_bgr=frame_bgr, return_trace=True, **pipeline_kwargs
+    )
+    annotated_rgb = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
+    col_img, col_why = st.columns([3, 2], gap="large")
+    with col_img:
+        st.image(annotated_rgb, caption=title, use_container_width=True)
+    with col_why:
+        _render_decision_explanation(trace)
+
+
+def _render_how_it_works():
+    # landing tab: what the system does, how the pipeline works, and honest results
+
+    st.markdown(
+        "Drive Aware looks at an in-car camera image and decides whether the driver is "
+        "**actively using a handheld phone**. Instead of flagging any phone that appears in "
+        "the frame, it combines an object detector with body-pose analysis, so it only gets "
+        "suspicious when the driver's posture says it should."
+    )
+
+    st.markdown("#### The two-stage pipeline")
+    st.graphviz_chart(
+        """
+        digraph {
+            rankdir=LR;
+            bgcolor="transparent";
+            node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=11,
+                  color="#4F8CFF", fillcolor="#1A2233", fontcolor="white", margin="0.18,0.1"];
+            edge [color="#8A93A6", fontname="Helvetica", fontsize=10, fontcolor="#C9CED8"];
+
+            frame [label="Camera frame"];
+            yolo1 [label="1. YOLOv11\\nphone detector\\n(75% threshold)"];
+            pose  [label="2. MediaPipe pose\\nIs a hand near\\nthe face?"];
+            yolo2 [label="3. YOLOv11 again\\n(25% threshold)"];
+            yes   [label="Phone use", fillcolor="#5C1F24", color="#E5484D"];
+            no    [label="No phone use", fillcolor="#1D3B26", color="#46A758"];
+
+            frame -> yolo1;
+            yolo1 -> yes  [label="confident"];
+            yolo1 -> pose [label="not sure"];
+            pose  -> no   [label="no"];
+            pose  -> yolo2 [label="yes"];
+            yolo2 -> yes  [label="found"];
+            yolo2 -> no   [label="not found"];
+        }
+        """,
+        use_container_width=True,
+    )
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown("**1 · Detect**  \nA fine-tuned YOLOv11 model looks for a phone. "
+                    "If it's confident, that's enough.")
+    with c2:
+        st.markdown("**2 · Check posture**  \nIf it isn't sure, MediaPipe estimates the "
+                    "driver's pose and checks whether a hand is up by the face.")
+    with c3:
+        st.markdown("**3 · Look again**  \nOnly for suspicious poses, YOLO re-checks at a "
+                    "lower threshold to catch phones that are partly hidden.")
+
+    st.markdown("#### Results")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Accuracy", "95.8%")
+    m2.metric("Precision", "100%")
+    m3.metric("Recall", "89.0%")
+    m4.metric("Speed (CPU)", "6.1 FPS")
+    st.caption(
+        "Measured on 259 held-out test images (100 with phone use) from the same dataset "
+        "the model was trained on. Real-car testing, with different cameras, drivers and "
+        "lighting, is the next step. Re-run the numbers yourself in the Evaluation tab."
+    )
+
+    st.markdown("#### Try it")
+    st.markdown(
+        "- **Image Analysis**: upload a photo or pick a sample, and see why it decided what it did.\n"
+        "- **Video Analysis**: run a clip and get a drive report with a safety score and PDF export.\n"
+        "- **Live Webcam**: run detection on your own camera.\n"
+        "- **Evaluation**: compare YOLOv11, v8 and v5 on the labelled test set."
+    )
+    st.caption(
+        "BSc Computer Science dissertation, Brunel University of London · Muddasir Khan"
+    )
 
 
 def _play_alert_sound():
@@ -737,6 +933,7 @@ def _run_live_webcam_streamlit(
     frame_placeholder,
     info_placeholder,
     report_placeholder,
+    show_debug: bool = False,
 ):
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
@@ -858,15 +1055,18 @@ def _run_live_webcam_streamlit(
                     annotated, pose_result, draw_connections=True
                 )
 
-            annotated = Visualizer.annotate_status(
-                annotated,
-                active=active,
-                suspicious=suspicious,
-                used_conf=used_conf,
-                reason=reason,
-                face_dist=face_d,
-                hand_dist=hand_d,
-            )
+            if show_debug:
+                annotated = Visualizer.annotate_status(
+                    annotated,
+                    active=active,
+                    suspicious=suspicious,
+                    used_conf=used_conf,
+                    reason=reason,
+                    face_dist=face_d,
+                    hand_dist=hand_d,
+                )
+            else:
+                annotated = Visualizer.annotate_verdict(annotated, active=active)
 
             # fps counter
             dt = time.time() - t0
@@ -943,6 +1143,7 @@ def _analyze_video_file_streamlit(
     status_placeholder,
     frame_placeholder,
     report_placeholder,
+    show_debug: bool = False,
 ):
     # OpenCV needs a real file path, so write the upload to a temp file first
     suffix = Path(uploaded_file.name).suffix or ".mp4"
@@ -1070,15 +1271,18 @@ def _analyze_video_file_streamlit(
                     annotated, pose_result, draw_connections=True
                 )
 
-            annotated = Visualizer.annotate_status(
-                annotated,
-                active=active,
-                suspicious=suspicious,
-                used_conf=used_conf,
-                reason=reason,
-                face_dist=face_d,
-                hand_dist=hand_d,
-            )
+            if show_debug:
+                annotated = Visualizer.annotate_status(
+                    annotated,
+                    active=active,
+                    suspicious=suspicious,
+                    used_conf=used_conf,
+                    reason=reason,
+                    face_dist=face_d,
+                    hand_dist=hand_d,
+                )
+            else:
+                annotated = Visualizer.annotate_verdict(annotated, active=active)
 
             # update the preview roughly every half second to avoid flooding the UI
             if frame_idx % max(1, int(fps // 2)) == 0:
@@ -1591,52 +1795,79 @@ def _run_evaluation(
 
 # entry point — sets up the page, sidebar, and the four main tabs
 
+PAGE_CSS = """
+<style>
+    .block-container { padding-top: 2.2rem; max-width: 1200px; }
+    .da-hero h1 { font-size: 2.6rem; margin-bottom: 0.2rem; }
+    .da-hero p { color: #A3ABBA; font-size: 1.05rem; margin-top: 0; }
+    .da-tags span {
+        display: inline-block; margin: 0 6px 6px 0; padding: 3px 12px;
+        border: 1px solid #4F8CFF; border-radius: 999px;
+        color: #8FB4FF; font-size: 0.8rem;
+    }
+    .da-verdict {
+        padding: 12px 16px; border-radius: 10px; font-weight: 700;
+        font-size: 1.15rem; margin-bottom: 0.8rem; color: white;
+    }
+    .da-verdict-on { background: #B42F35; }
+    .da-verdict-off { background: #2E7D45; }
+</style>
+"""
+
+
 def main():
     st.set_page_config(
-        page_title="Drive Aware",
+        page_title="DriveAware - Driver Phone-Use Detection",
         layout="wide",
+        initial_sidebar_state="collapsed",
     )
+    st.markdown(PAGE_CSS, unsafe_allow_html=True)
 
-    st.title("Drive Aware")
     st.markdown(
-        "AI-based computer vision system for detecting mobile phone use while driving."
+        "<div class='da-hero'><h1>DriveAware</h1>"
+        "<p>Detects drivers using a handheld phone from in-car camera images, "
+        "video and live webcam.</p></div>"
+        "<div class='da-tags'><span>YOLOv11</span><span>MediaPipe pose</span>"
+        "<span>OpenCV</span><span>Streamlit</span></div>",
+        unsafe_allow_html=True,
     )
 
     # all detection parameters are controlled from the sidebar
     with st.sidebar:
-        st.markdown("## Drive Aware")
-        st.header("Settings")
+        st.markdown("## Settings")
+        st.caption("The defaults are the configuration used in the evaluation.")
 
-        default_phone_model = "weights/best.pt"
-        default_pose_task = "pose_landmarker_full.task"
-
-        phone_model_path = st.text_input("YOLO phone model path", default_phone_model)
-        pose_task_path = st.text_input("MediaPipe pose .task path", default_pose_task)
-
-        st.subheader("Thresholds")
-        conf_high = st.slider(
-            "YOLO conf (normal)", 0.0, 1.0, 0.75, 0.01,
-            help="Minimum confidence for the detector to flag a phone. Higher = fewer false alarms.",
-        )
-        conf_low = st.slider(
-            "YOLO conf (when suspicious)", 0.0, 1.0, 0.25, 0.01,
-            help="Fallback confidence used only when the pose looks suspicious. Lower catches more borderline cases.",
-        )
-        hand_face_thresh = st.slider(
-            "Hand–face distance (normalized)", 0.05, 0.5, 0.18, 0.01,
-            help="How close a hand must be to the face to count as suspicious. Higher = more sensitive.",
-        )
-        hand_phone_thresh = st.slider(
-            "Phone–hand distance (normalized)", 0.05, 0.5, 0.12, 0.01,
-            help="How close a detected phone must be to a hand. Only used when hand-proximity filtering is on.",
+        draw_pose = st.toggle("Show pose skeleton", value=True)
+        show_debug = st.toggle(
+            "Show technical overlay", value=False,
+            help="Replace the clean verdict banner with raw confidences and distances.",
         )
 
-        st.subheader("Logic & Visuals")
-        require_hand_proximity = st.checkbox(
-            "Require phone near hand / suspicious face", value=False,
-            help="If enabled, a phone is only considered ACTIVE when it's near a hand or the hands are near the face.",
-        )
-        draw_pose = st.checkbox("Draw pose skeleton", value=True)
+        with st.expander("Detection thresholds"):
+            conf_high = st.slider(
+                "Phone confidence (normal)", 0.0, 1.0, 0.75, 0.01,
+                help="Minimum confidence for the detector to flag a phone. Higher = fewer false alarms.",
+            )
+            conf_low = st.slider(
+                "Phone confidence (when pose is suspicious)", 0.0, 1.0, 0.25, 0.01,
+                help="Fallback confidence used only when the pose looks suspicious. Lower catches more borderline cases.",
+            )
+            hand_face_thresh = st.slider(
+                "Hand-to-face distance", 0.05, 0.5, 0.18, 0.01,
+                help="How close a hand must be to the face to count as suspicious (fraction of image size).",
+            )
+            hand_phone_thresh = st.slider(
+                "Phone-to-hand distance", 0.05, 0.5, 0.12, 0.01,
+                help="How close a detected phone must be to a hand. Only used when the hand filter is on.",
+            )
+            require_hand_proximity = st.checkbox(
+                "Only count phones held in the hand", value=False,
+                help="If enabled, a phone only counts when it's near a hand or the hands are near the face.",
+            )
+
+        with st.expander("Model files"):
+            phone_model_path = st.text_input("YOLO phone model", "weights/best.pt")
+            pose_task_path = st.text_input("MediaPipe pose model", "pose_landmarker_full.task")
 
     # load the model before setting up tabs so any path error shows at the top
     try:
@@ -1645,9 +1876,25 @@ def main():
         st.error(f"Could not load YOLO model from `{phone_model_path}`.\n\nError: {e}")
         return
 
-    tab_img, tab_vid, tab_live, tab_eval = st.tabs(
-        ["Image Analysis", "Video Analysis", "Live Webcam", "Evaluation"]
+    pipeline_kwargs = dict(
+        phone_model=phone_model,
+        pose_task_path=pose_task_path,
+        conf_high=conf_high,
+        conf_low=conf_low,
+        hand_face_thresh=hand_face_thresh,
+        hand_phone_thresh=hand_phone_thresh,
+        require_hand_proximity=require_hand_proximity,
+        draw_pose=draw_pose,
+        show_debug=show_debug,
     )
+
+    tab_how, tab_img, tab_vid, tab_live, tab_eval = st.tabs(
+        ["How it works", "Image Analysis", "Video Analysis", "Live Webcam", "Evaluation"]
+    )
+
+    # ── How it works tab ──
+    with tab_how:
+        _render_how_it_works()
 
     # ── Image Analysis tab ──
     with tab_img:
@@ -1672,19 +1919,7 @@ def main():
                         pil_img = Image.open(up).convert("RGB")
                         frame_rgb = np.array(pil_img)
                         frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-                        annotated_bgr, _, _ = _process_single_image_bgr(
-                            frame_bgr=frame_bgr,
-                            phone_model=phone_model,
-                            pose_task_path=pose_task_path,
-                            conf_high=conf_high,
-                            conf_low=conf_low,
-                            hand_face_thresh=hand_face_thresh,
-                            hand_phone_thresh=hand_phone_thresh,
-                            require_hand_proximity=require_hand_proximity,
-                            draw_pose=draw_pose,
-                        )
-                        annotated_rgb = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
-                        st.image(annotated_rgb, caption=f"Detection result - {up.name}", use_container_width=True)
+                        _show_image_result(frame_bgr, f"Detection result - {up.name}", **pipeline_kwargs)
 
         elif image_source == "Choose from sample images":
             samples = _get_sample_images_with_labels()
@@ -1778,19 +2013,7 @@ def main():
                             if frame_bgr is None:
                                 st.warning(f"Could not read image: {label}")
                                 continue
-                            annotated_bgr, _, _ = _process_single_image_bgr(
-                                frame_bgr=frame_bgr,
-                                phone_model=phone_model,
-                                pose_task_path=pose_task_path,
-                                conf_high=conf_high,
-                                conf_low=conf_low,
-                                hand_face_thresh=hand_face_thresh,
-                                hand_phone_thresh=hand_phone_thresh,
-                                require_hand_proximity=require_hand_proximity,
-                                draw_pose=draw_pose,
-                            )
-                            annotated_rgb = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
-                            st.image(annotated_rgb, caption=f"Detection result — {label}", use_container_width=True)
+                            _show_image_result(frame_bgr, f"Detection result — {label}", **pipeline_kwargs)
 
         else:  # Take a photo
             cam_img = st.camera_input("Take a photo to analyse")
@@ -1799,19 +2022,7 @@ def main():
                     pil_img = Image.open(cam_img).convert("RGB")
                     frame_rgb = np.array(pil_img)
                     frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-                    annotated_bgr, _, _ = _process_single_image_bgr(
-                        frame_bgr=frame_bgr,
-                        phone_model=phone_model,
-                        pose_task_path=pose_task_path,
-                        conf_high=conf_high,
-                        conf_low=conf_low,
-                        hand_face_thresh=hand_face_thresh,
-                        hand_phone_thresh=hand_phone_thresh,
-                        require_hand_proximity=require_hand_proximity,
-                        draw_pose=draw_pose,
-                    )
-                    annotated_rgb = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
-                    st.image(annotated_rgb, caption="Detection result", use_container_width=True)
+                    _show_image_result(frame_bgr, "Detection result", **pipeline_kwargs)
 
     # ── Video Analysis tab ──
     with tab_vid:
@@ -1850,6 +2061,7 @@ def main():
                         hand_phone_thresh=hand_phone_thresh,
                         require_hand_proximity=require_hand_proximity,
                         draw_pose=draw_pose,
+                        show_debug=show_debug,
                         progress_placeholder=progress_placeholder,
                         status_placeholder=status_placeholder,
                         frame_placeholder=frame_placeholder,
@@ -1923,6 +2135,7 @@ def main():
                             hand_phone_thresh=hand_phone_thresh,
                             require_hand_proximity=require_hand_proximity,
                             draw_pose=draw_pose,
+                            show_debug=show_debug,
                             progress_placeholder=progress_placeholder,
                             status_placeholder=status_placeholder,
                             frame_placeholder=frame_placeholder,
@@ -1970,6 +2183,7 @@ def main():
                 hand_phone_thresh=hand_phone_thresh,
                 require_hand_proximity=require_hand_proximity,
                 draw_pose=draw_pose,
+                show_debug=show_debug,
                 max_seconds=max_seconds,
                 frame_placeholder=frame_placeholder,
                 info_placeholder=info_placeholder,
