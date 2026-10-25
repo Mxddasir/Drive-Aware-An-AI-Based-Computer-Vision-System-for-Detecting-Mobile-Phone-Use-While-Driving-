@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.pyc
+
+# macOS / editors
+.DS_Store
+*.code-workspace
+
+# local outputs
+outputs/
+*.log
