@@ -3,3 +3,4 @@ ultralytics
 opencv-python-headless==4.10.0.84
 torch
 mediapipe>=0.10.0
+reportlab
