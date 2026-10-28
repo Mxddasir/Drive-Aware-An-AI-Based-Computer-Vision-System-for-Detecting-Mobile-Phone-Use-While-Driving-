@@ -64,8 +64,8 @@ Every image result in the app comes with a **"How it decided"** panel that walks
 Requires Python 3.10+ (and a webcam for live mode).
 
 ```bash
-git clone https://github.com/Mxddasir/DriveAware---Yolov11-with-Mediapipe-poseEstimation.git
-cd DriveAware---Yolov11-with-Mediapipe-poseEstimation
+git clone https://github.com/Mxddasir/Drive-Aware-An-AI-Based-Computer-Vision-System-for-Detecting-Mobile-Phone-Use-While-Driving-.git
+cd Drive-Aware-An-AI-Based-Computer-Vision-System-for-Detecting-Mobile-Phone-Use-While-Driving-
 pip install -r requirements.txt
 streamlit run streamlit_fusion_app.py
 ```
