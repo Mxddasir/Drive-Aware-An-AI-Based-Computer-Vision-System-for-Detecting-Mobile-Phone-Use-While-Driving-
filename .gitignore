@@ -9,3 +9,7 @@ __pycache__/
 # local outputs
 outputs/
 *.log
+
+# virtual environments
+.venv/
+venv/

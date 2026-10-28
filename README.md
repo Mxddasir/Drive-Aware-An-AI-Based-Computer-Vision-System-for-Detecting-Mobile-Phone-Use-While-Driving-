@@ -6,8 +6,6 @@ DriveAware combines a fine-tuned **YOLOv11** phone detector with **MediaPipe** b
 
 Built as my BSc Computer Science dissertation at Brunel University of London (graded A, presented at the Brunel Software Innovation showcase).
 
-![DriveAware detecting phone use, with the step-by-step explanation](docs/demo_detection.png)
-
 ---
 
 ## Results
@@ -58,11 +56,6 @@ Every image result in the app comes with a **"How it decided"** panel that walks
 | **Video Analysis** | Frame-by-frame analysis of a clip, with a drive report: safety score, incident timeline and PDF export |
 | **Live Webcam** | Real-time detection with an audio alert for sustained phone use |
 | **Evaluation** | Runs the full pipeline on the labelled test set and compares YOLOv11, v8 and v5: accuracy, precision, recall, F1, confusion matrix and per-stage timing |
-
-<p>
-  <img src="docs/how_it_works_tab.png" width="49%" alt="How it works tab"/>
-  <img src="docs/no_phone_result.png" width="49%" alt="Result with no phone use"/>
-</p>
 
 ---
 
@@ -148,7 +141,7 @@ Distances are a fraction of the image size. Turn on **Show technical overlay** t
 
 ## Dissertation version
 
-The exact code that was submitted and evaluated is tagged [`v1.0-dissertation`](../../tree/v1.0-dissertation). Later changes improve the interface and documentation only. The detection logic and default thresholds are unchanged, so the results above still apply.
+The exact code that was submitted and evaluated is tagged [`original`](../../tree/original). Later changes improve the interface and documentation only. The detection logic and default thresholds are unchanged, so the results above still apply.
 
 ---
 
